@@ -150,7 +150,7 @@ class UpdatingModelTimeLLMProcessor:
                 nf.fit(df = self.dfs[i])
                 
                 self.nfs.append(nf)
-                nf.save(path=f'AutoLSTM/updating_models/{model_names[i]}/', overwrite = True)
+                nf.save(path=f'TimeLLM/updating_models/{model_names[i]}/', overwrite = True)
         
         for i in range(len(self.dfs)):
             y_hat = self.nfs[i].predict(df = self.dfs[i])
