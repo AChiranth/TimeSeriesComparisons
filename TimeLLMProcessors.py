@@ -15,6 +15,44 @@ import matplotlib.colors as mcolors
 
 from transformers import AutoConfig, AutoModel, AutoTokenizer, AutoModelForCausalLM
 
+import optuna
+
+
+def objective_wrapper(df, config, h, prompt, freq):
+    def objective(trial):
+        #Split dataframe into train_df and val_df
+        #Fix to rolling window for training df and validation df
+        train_df = df.iloc[:-1*h]
+        val_df = df.loc[-1*h:]
+        
+        hyperparameters = {}
+        
+        #Iterate through config for hyperparameter search space
+        for param, val in config.items():
+            if type(val) == list:
+                if type(val[0]) == int:
+                    hyperparameters[param] = trial.suggest_int(param, val[0], val[1])
+                if type(val[0]) == float:
+                    hyperparameters[param] = trial.suggest_float(param, val[0], val[1])
+            if type(val == int):
+                hyperparameters[param] = val
+        
+        
+        nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'openai-community/gpt2', prompt_prefix = prompt, **hyperparameters)], freq = freq)
+        nf.fit(df = train_df)
+        y_pred = nf.predict(df = val_df)
+        
+        return mean_absolute_error(y_pred, val_df["y"])
+    
+    return objective
+
+
+
+
+
+
+
+
 class FixedModelTimeLLMProcessor():
     def __init__(self, overall_df, dates):
         self.overall_df = overall_df
@@ -50,17 +88,21 @@ class FixedModelTimeLLMProcessor():
             df.rename(columns = {value_col: "y"}, inplace=True)
             self.dfs.append(df)
     
-    def create_fixed_model(self, h, freq, model_name, prompt, string_param = "input_size", val = 70):
-        fixed_params = {"input_size": 70, "patch_len": 16, "stride": 8}
-        fixed_params[string_param] = val
+    def create_fixed_model(self, h, freq, model_name, prompt, config = {}, save = False):
+        
+        
         if not self.nf:
+            obj = objective_wrapper(df = self.dfs[0], h = h, freq = freq, prompt = prompt, config = config)
+            study = optuna.create_study(direction="minimize")
+            study.optimize(obj, n_trials=10)
+            
             self.nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'openai-community/gpt2', 
                                                        prompt_prefix = prompt, 
-                                                       windows_batch_size = 200, inference_windows_batch_size = 200,
-                                                       **fixed_params
+                                                       **study.best_params
                                                       )], freq = freq)
             self.nf.fit(df = self.dfs[0])
-            self.nf.save(path=f'TimeLLM/fixed_models/{model_name}/', overwrite=True)
+            if save:
+                self.nf.save(path=f'TimeLLM/fixed_models/{model_name}/', overwrite=True)
         
         for i in range(len(self.dfs)):
             df = self.dfs[i]
