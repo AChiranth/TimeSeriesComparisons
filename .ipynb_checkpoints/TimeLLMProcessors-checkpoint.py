@@ -18,38 +18,53 @@ from transformers import AutoConfig, AutoModel, AutoTokenizer, AutoModelForCausa
 import optuna
 
 
-def objective_wrapper(df, config, h, prompt, freq):
+def objective_wrapper(df, config, window_size, h, prompt, freq, train_prop = 0.7, stride = 1):
     def objective(trial):
-        #Split dataframe into train_df and val_df
-        #Fix to rolling window for training df and validation df
-        train_df = df.iloc[:-1*h]
-        val_df = df.loc[-1*h:]
+        #Split dataframe into train_df, val_x, and val_y
+        train_size = int(len(df) * train_prop)
+        train_df = df.iloc[:train_size]
+        val_x = df.iloc[train_size:-h]
+        val_y = df.iloc[train_size + window_size:]
+        
+        #Create windowed dataframes
+        windowed_train_df = create_windowed_df(train_df, input_size=window_size, stride = stride)
+        windowed_val_x = create_windowed_df(val_x, input_size=window_size, stride = stride)
+        windowed_val_y = create_windowed_df(val_y, input_size=h, stride = stride)
         
         hyperparameters = {}
         
         #Iterate through config for hyperparameter search space
         for param, val in config.items():
-            if type(val) == list:
-                if type(val[0]) == int:
-                    hyperparameters[param] = trial.suggest_int(param, val[0], val[1])
-                if type(val[0]) == float:
-                    hyperparameters[param] = trial.suggest_float(param, val[0], val[1])
-            if type(val == int):
+            #Just one integer
+            if type(val) == int:
                 hyperparameters[param] = val
+            else:
+                if val["type"] == "categorical":
+                    hyperparameters[param] = trial.suggest_categorical(param, val["values"])
+                elif val["type"] == "integer":
+                    hyperparameters[param] = trial.suggest_int(param, val["values"][0], val["values"][1])
+                elif val["type"] == "float":
+                    hyperparameters[param] = trial.suggest_float(param, val["values"][0], val["values"][1])
+
         
         
-        nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'openai-community/gpt2', prompt_prefix = prompt, **hyperparameters)], freq = freq)
-        nf.fit(df = train_df)
-        y_pred = nf.predict(df = val_df)
+        nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'gpt2-medium', d_llm = 1024, prompt_prefix = prompt, **hyperparameters)], freq = freq)
+        nf.fit(df = windowed_train_df)
+        y_pred = nf.predict(df = windowed_val_x)
         
-        return mean_absolute_error(y_pred, val_df["y"])
+        return mean_absolute_error(windowed_val_y["y"], y_pred["TimeLLM"])
     
     return objective
 
-
-
-
-
+def create_windowed_df(df, input_size, stride = 1):
+    
+    windows = []
+    for i in range(0, len(df) - input_size + 1, stride):
+        window = df.iloc[i:i+input_size].copy()
+        window["unique_id"] = f"window_{i:03d}"
+        windows.append(window)
+    
+    return pd.concat(windows, ignore_index=True)
 
 
 
@@ -88,15 +103,15 @@ class FixedModelTimeLLMProcessor():
             df.rename(columns = {value_col: "y"}, inplace=True)
             self.dfs.append(df)
     
-    def create_fixed_model(self, h, freq, model_name, prompt, config = {}, save = False):
+    def create_fixed_model(self, h, freq, model_name, prompt, window_size, config = {}, save = False, train_prop = 0.7, stride = 1):
         
         
         if not self.nf:
-            obj = objective_wrapper(df = self.dfs[0], h = h, freq = freq, prompt = prompt, config = config)
+            obj = objective_wrapper(df = self.dfs[0], h = h, freq = freq, prompt = prompt, window_size = window_size, config = config, train_prop = train_prop, stride = stride)
             study = optuna.create_study(direction="minimize")
             study.optimize(obj, n_trials=10)
             
-            self.nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'openai-community/gpt2', 
+            self.nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'gpt2-medium', d_llm = 1024,
                                                        prompt_prefix = prompt, 
                                                        **study.best_params
                                                       )], freq = freq)
@@ -176,23 +191,27 @@ class UpdatingModelTimeLLMProcessor:
     def create_training_dfs(self, value_col):
         self.overall_df_value_col = value_col
         for date in self.dates:
-            df = self.overall_df.loc[:date]
+            df = self.overall_df.loc[:date].copy()
             df['ds'] = df.index
             df["unique_id"] = "series_1"
             df = df.rename(columns = {value_col: "y"})
             self.dfs.append(df)
     
-    def create_models(self, h, freq, model_names, prompt):
+    def create_models(self, h, freq, model_names, prompt, window_size, config = {}, save = False, train_prop = 0.7, stride = 1):
         if not self.nfs:
             for i in range(len(self.dfs)):
-                nf = NeuralForecast(models = [TimeLLM(h = h, input_size = 3 * h, llm = 'openai-community/gpt2', 
+                obj = objective_wrapper(df = self.dfs[i], h = h, freq = freq, prompt = prompt, window_size = window_size, config = config, train_prop = train_prop, stride = stride)
+                study = optuna.create_study(direction="minimize")
+                study.optimize(obj, n_trials=10)
+                nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'gpt2-medium', d_llm = 1024,
                                                        prompt_prefix = prompt, 
-                                                       batch_size = 1, windows_batch_size = 32, inference_windows_batch_size = 32
+                                                       **study.best_params
                                                       )], freq = freq)
                 nf.fit(df = self.dfs[i])
                 
                 self.nfs.append(nf)
-                nf.save(path=f'TimeLLM/updating_models/{model_names[i]}/', overwrite = True)
+                if save:
+                    nf.save(path=f'TimeLLM/updating_models/{model_names[i]}/', overwrite = True)
         
         for i in range(len(self.dfs)):
             y_hat = self.nfs[i].predict(df = self.dfs[i])
