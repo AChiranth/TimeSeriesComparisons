@@ -103,30 +103,66 @@ class FixedModelTimeLLMProcessor():
             df.rename(columns = {value_col: "y"}, inplace=True)
             self.dfs.append(df)
     
-    def create_fixed_model(self, h, freq, model_name, prompt, window_size, config = {}, save = False, train_prop = 0.7, stride = 1):
+    def create_fixed_model(self, h, freq, model_name, prompt, window_size = 16, config = {}, save = False, tune = True, sliding = False, train_prop = 0.7, stride = 1):
         
         
         if not self.nf:
-            obj = objective_wrapper(df = self.dfs[0], h = h, freq = freq, prompt = prompt, window_size = window_size, config = config, train_prop = train_prop, stride = stride)
-            study = optuna.create_study(direction="minimize")
-            study.optimize(obj, n_trials=10)
-            
-            self.nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'gpt2-medium', d_llm = 1024,
-                                                       prompt_prefix = prompt, 
-                                                       **study.best_params
-                                                      )], freq = freq)
-            self.nf.fit(df = self.dfs[0])
+            if tune and not sliding:
+                obj = objective_wrapper(df = self.dfs[0], h = h, freq = freq, prompt = prompt, window_size = window_size, config = config, train_prop = train_prop, stride = stride)
+                study = optuna.create_study(direction="minimize")
+                study.optimize(obj, n_trials=10)
+
+                self.nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'gpt2-medium', d_llm = 1024,
+                                                           prompt_prefix = prompt, 
+                                                           **study.best_params
+                                                          )], freq = freq)
+                self.nf.fit(df = self.dfs[0])
+            if not tune and not sliding:
+                self.nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'gpt2-medium', d_llm = 1024,
+                                                           prompt_prefix = prompt, 
+                                                           input_size = 16, windows_batch_size = 64,
+                                                           inference_windows_batch_size = 64
+                                                          )], freq = freq)
+                self.nf.fit(df = self.dfs[0])
             if save:
                 self.nf.save(path=f'TimeLLM/fixed_models/{model_name}/', overwrite=True)
         
         for i in range(len(self.dfs)):
-            df = self.dfs[i]
-            y_hat = self.nf.predict(df = df)
+            if not sliding:
+                df = self.dfs[i]
+                y_hat = self.nf.predict(df = df)
 
-            y_hat.set_index("ds", inplace = True)
-            y_hat.drop(columns = "unique_id", inplace = True)
-            self.forecasts.append(y_hat)
-        
+                y_hat.set_index("ds", inplace = True)
+                y_hat.drop(columns = "unique_id", inplace = True)
+                self.forecasts.append(y_hat)
+            else:
+                sliding_df = self.dfs[0].copy()
+                forecast = pd.DataFrame()
+                for i in range(h):
+                    self.nf = NeuralForecast(models = [TimeLLM(h = 1, llm = 'gpt2-medium', d_llm = 1024,
+                                                           prompt_prefix = prompt, 
+                                                           input_size = 16, windows_batch_size = 64,
+                                                           inference_windows_batch_size = 64
+                                                          )], freq = "W-SAT")
+                
+                    self.nf.fit(sliding_df)
+                    fc = self.nf.predict(df = sliding_df)
+                    del self.nf
+                    
+                    y_hat = fc.copy()
+                    y_hat.set_index("ds", inplace = True)
+                    y_hat.drop(columns = "unique_id", inplace = True)
+                    forecast = pd.concat([forecast, y_hat])
+                    
+                    fc = fc.rename(columns = {"TimeLLM": "y"})
+                    fc["date"] = fc["ds"].copy()
+                    fc.set_index("date", inplace = True)
+                    
+                    sliding_df = pd.concat([sliding_df, fc])
+                    sliding_df = sliding_df.iloc[1:].copy()
+                    
+                
+                self.forecasts.append(forecast)
 
     def load_fixed_model(self, path):
         self.nf = NeuralForecast.load(path = path)
