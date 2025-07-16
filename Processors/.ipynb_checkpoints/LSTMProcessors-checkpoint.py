@@ -14,6 +14,8 @@ import matplotlib.colors as mcolors
 from neuralforecast.losses.pytorch import MQLoss
 import optuna
 
+
+
 class FixedModelLSTMProcessor:
     def __init__(self, overall_df, dates):
         self.overall_df = overall_df 
@@ -49,7 +51,9 @@ class FixedModelLSTMProcessor:
     def create_fixed_model(self, h, freq, model_name, level = [], config = None, save = False):
         #Creating AutoLSTM model and predicting with hyperparameter tuning by optuna backend. This is based upon the first training dataframe
         
-        
+        #Default config
+        if config == None:
+            config = self.config_wrapper(index = 0, h = h)
         
         #Checking if model has already been loaded in and fit
         if not self.nf:
@@ -73,7 +77,24 @@ class FixedModelLSTMProcessor:
             y_hat.set_index("ds", inplace = True)
             y_hat.drop(columns = "unique_id", inplace = True)
             self.forecasts.append(y_hat)
-
+            
+    def config_wrapper(self, index, h):
+        def config_LSTM(trial):
+            input_len = self.dfs[index].groupby("unique_id").size().min()
+            max_inp = max(8, input_len - h - 1)
+            return {
+            "input_size": trial.suggest_int("input_size", 8, max_inp),
+            "encoder_hidden_size": trial.suggest_categorical("encoder_hidden_size", [32, 64, 128]),
+            "encoder_n_layers": trial.suggest_int("encoder_n_layers", 1, 3),
+            "context_size": trial.suggest_int("context_size", 1, h),
+            "decoder_hidden_size": trial.suggest_categorical("decoder_hidden_size", [32, 64, 128]),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True),
+            "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
+            "random_seed": trial.suggest_int("random_seed", 1, 99999),
+            "max_steps": 1000
+            }
+    
+        return config_LSTM
     
     def load_fixed_model(self, path):
         self.nf = NeuralForecast.load(path = path)
@@ -241,7 +262,7 @@ class UpdatingModelLSTMProcessor:
     def create_training_dfs(self, value_col):
         self.overall_df_value_col = value_col
         for date in self.dates:
-            df = self.overall_df.loc[:date]
+            df = self.overall_df.loc[:date].copy()
             df['ds'] = df.index
             df["unique_id"] = "series_1"
             df = df.rename(columns = {value_col: "y"})
@@ -250,8 +271,11 @@ class UpdatingModelLSTMProcessor:
     def create_models(self, h, freq, model_names, level = [], config = None, save = False):
         if not self.nfs:
             for i in range(len(self.dfs)):
-                if not level:
-                    nf = NeuralForecast(models = [AutoLSTM(h = h, backend = "optuna", config = config, search_alg = optuna.samplers.TPESample())], freq = freq)
+                #Default config
+                if config == None:
+                    config = self.config_wrapper(index = i, h = h)
+                if not level:   
+                    nf = NeuralForecast(models = [AutoLSTM(h = h, backend = "optuna", config = config, search_alg = optuna.samplers.TPESampler())], freq = freq)
                     nf.fit(df = self.dfs[i])
                 else:
                     nf = NeuralForecast(models = [AutoLSTM(h = h, backend = "optuna", loss = MQLoss(level = level), config = config, search_alg = optuna.samplers.TPESampler())], 
@@ -270,7 +294,25 @@ class UpdatingModelLSTMProcessor:
             y_hat.set_index("ds", inplace = True)
             y_hat.drop(columns = "unique_id", inplace = True)
             self.forecasts.append(y_hat)
-
+            
+    def config_wrapper(self, index, h):
+        def config_LSTM(trial):
+            input_len = self.dfs[index].groupby("unique_id").size().min()
+            max_inp = max(8, input_len - h - 1)
+            return {
+            "input_size": trial.suggest_int("input_size", 8, max_inp),
+            "encoder_hidden_size": trial.suggest_categorical("encoder_hidden_size", [32, 64, 128]),
+            "encoder_n_layers": trial.suggest_int("encoder_n_layers", 1, 3),
+            "context_size": trial.suggest_int("context_size", 1, h),
+            "decoder_hidden_size": trial.suggest_categorical("decoder_hidden_size", [32, 64, 128]),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True),
+            "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
+            "random_seed": trial.suggest_int("random_seed", 1, 99999),
+            "max_steps": 1000
+            }
+    
+        return config_LSTM
+    
     def load_models(self, paths):
         for i in range(len(paths)):
             nf = NeuralForecast.load(path = paths[i])

@@ -17,6 +17,8 @@ from transformers import AutoConfig, AutoModel, AutoTokenizer, AutoModelForCausa
 
 import optuna
 
+import gc
+
 
 def objective_wrapper(df, config, window_size, h, prompt, freq, train_prop = 0.7, stride = 1):
     def objective(trial):
@@ -51,6 +53,10 @@ def objective_wrapper(df, config, window_size, h, prompt, freq, train_prop = 0.7
         nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'gpt2-medium', d_llm = 1024, prompt_prefix = prompt, **hyperparameters)], freq = freq)
         nf.fit(df = windowed_train_df)
         y_pred = nf.predict(df = windowed_val_x)
+        
+        del nf
+        torch.cuda.empty_cache()
+        gc.collect()
         
         return mean_absolute_error(windowed_val_y["y"], y_pred["TimeLLM"])
     
@@ -110,7 +116,7 @@ class FixedModelTimeLLMProcessor():
             if tune and not sliding:
                 obj = objective_wrapper(df = self.dfs[0], h = h, freq = freq, prompt = prompt, window_size = window_size, config = config, train_prop = train_prop, stride = stride)
                 study = optuna.create_study(direction="minimize")
-                study.optimize(obj, n_trials=10)
+                study.optimize(obj, n_trials=10, gc_after_trial=True)
 
                 self.nf = NeuralForecast(models = [TimeLLM(h = h, llm = 'gpt2-medium', d_llm = 1024,
                                                            prompt_prefix = prompt, 

@@ -13,6 +13,8 @@ import matplotlib.colors as mcolors
 from neuralforecast.losses.pytorch import MQLoss
 import optuna
 
+
+
 class FixedModelPatchTSTProcessor:
     def __init__(self, overall_df, dates):
         self.overall_df = overall_df 
@@ -46,6 +48,9 @@ class FixedModelPatchTSTProcessor:
     
     def create_fixed_model(self, h, freq, model_name, level = [], config = None, save = False):
         
+        if config == None:
+            config = self.config_wrapper(index = 0, h = h)
+        
         #Checking if model has already been loaded in and fit
         if not self.nf:
             if not level:
@@ -68,6 +73,23 @@ class FixedModelPatchTSTProcessor:
             y_hat.set_index("ds", inplace = True)
             y_hat.drop(columns = "unique_id", inplace = True)
             self.forecasts.append(y_hat)
+            
+    def config_wrapper(self, index, h):
+        def config_PatchTST(trial):
+            input_len = self.dfs[index].groupby("unique_id").size().min()
+            max_inp = max(8, input_len - h - 1)
+            return {
+            "input_size": trial.suggest_int("input_size", 8, max_inp),
+            "hidden_size": trial.suggest_categorical("hidden_size", [32, 64, 128]),
+            "encoder_layers": trial.suggest_int("encoder_layers", 1, 3),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True),
+            "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
+            "random_seed": trial.suggest_int("random_seed", 1, 99999),
+            "n_heads": trial.suggest_categorical("n_heads", [8, 16, 32]),
+            "max_steps": 1000
+            }
+    
+        return config_PatchTST
             
     def load_fixed_model(self, path):
         self.nf = NeuralForecast.load(path = path)
@@ -220,6 +242,8 @@ class UpdatingModelPatchTSTProcessor:
     def create_models(self, h, freq, model_names, level = [], config = None, save = False):
         if not self.nfs:
             for i in range(len(self.dfs)):
+                if config == None:
+                    config = self.config_wrapper(index = i, h = h)
                 if not level:
                     nf = NeuralForecast(models = [AutoPatchTST(h = h, backend = "optuna", config = config, search_alg = optuna.samplers.TPESampler())], freq = freq)
                     nf.fit(df = self.dfs[i])
@@ -240,6 +264,23 @@ class UpdatingModelPatchTSTProcessor:
             y_hat.set_index("ds", inplace = True)
             y_hat.drop(columns = "unique_id", inplace = True)
             self.forecasts.append(y_hat)
+    
+    def config_wrapper(self, index, h):
+        def config_PatchTST(trial):
+            input_len = self.dfs[index].groupby("unique_id").size().min()
+            max_inp = max(8, input_len - h - 1)
+            return {
+            "input_size": trial.suggest_int("input_size", 8, max_inp),
+            "hidden_size": trial.suggest_categorical("hidden_size", [32, 64, 128]),
+            "encoder_layers": trial.suggest_int("encoder_layers", 1, 3),
+            "learning_rate": trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True),
+            "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
+            "random_seed": trial.suggest_int("random_seed", 1, 99999),
+            "n_heads": trial.suggest_categorical("n_heads", [8, 16, 32]),
+            "max_steps": 1000
+            }
+    
+        return config_PatchTST
     
     def load_models(self, paths):
         for i in range(len(paths)):
