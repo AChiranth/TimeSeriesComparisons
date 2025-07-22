@@ -33,18 +33,17 @@ class FixedModelLSTMProcessor:
         self.mapes = []
         self.nmses = []
         
-        self.metrics_df = pd.DataFrame(columns = ["Reference Date", "MAE", "MSE", "MAPE", "NMSE"])
-        self.display_df = pd.DataFrame(columns = ["Reference Date", "Target End Date", "Quantile", "Prediction"])
+        self.metrics_df = pd.DataFrame(columns = ["Reference Date", "unique_id", "MAE", "MSE", "MAPE", "NMSE"])
+        self.display_df = pd.DataFrame(columns = ["Reference Date", "Target End Date", "unique_id", "Quantile", "Prediction"])
         
         self.color_mapping = {}
     
     def create_training_dfs(self, value_col):
         self.overall_df_value_col = value_col
+        self.overall_df['y'] = self.overall_df.groupby('unique_id', group_keys = False)['y'] \
+            .apply(lambda col: col.interpolate(limit_direction='both'))
         for date in self.dates:
-            df = self.overall_df.loc[:date].copy()
-            df['ds'] = df.index
-            df["unique_id"] = "series_1"
-            df = df.rename(columns = {value_col: "y"})
+            df = self.overall_df[self.overall_df["ds"] <= pd.Timestamp(date)].copy()
             self.dfs.append(df)
         
     
@@ -74,8 +73,7 @@ class FixedModelLSTMProcessor:
             df = self.dfs[i]
             y_hat = self.nf.predict(df = df)
 
-            y_hat.set_index("ds", inplace = True)
-            y_hat.drop(columns = "unique_id", inplace = True)
+            y_hat.sort_values(by = ["ds", "unique_id"], inplace = True)
             self.forecasts.append(y_hat)
             
     def config_wrapper(self, index, h):
@@ -104,6 +102,8 @@ class FixedModelLSTMProcessor:
         for col in columns:
             if 'median' in col:
                 continue
+            if col in ("unique_id", "ds"):
+                continue
             parts = col.split('-')
             number = parts[-1]
             intervals.add(number)
@@ -128,114 +128,123 @@ class FixedModelLSTMProcessor:
     
         return color_mapping
     
-    def create_graph(self):
+    def create_graph(self, unique_id):
+        
+        sliced_df = self.overall_df[self.overall_df["unique_id"] == unique_id]
         
         #Create color map for various confidence bands, only if levels are present
-        if len(self.forecasts[0].columns) != 1:
+        if len(self.forecasts[0].columns) > 3:
             self.color_mapping = self.generate_color_map(columns = self.forecasts[0].columns)
                 
         
         for i in range(len(self.forecasts)):
             #Plot the overall Real Data
+            
+            first_forecast_date = self.forecasts[i].iloc[0]["ds"]
+            final_forecast_date = self.forecasts[i].iloc[-1]["ds"]
+            
+            sliced_fc = self.forecasts[i][self.forecasts[i]["unique_id"] == unique_id]
+            
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x = self.overall_df.index, y = self.overall_df[self.overall_df_value_col], mode = "lines", name = "Real Data"))
+            fig.add_trace(go.Scatter(x = sliced_df["ds"], y = sliced_df["y"], mode = "lines", name = "Real Data"))
 
             
             for col in self.forecasts[i].columns:
                 #Plot his first
                 if "hi" in col:
                     number = col[-2:]
-                    fig.add_trace(go.Scatter(x = self.forecasts[i].index, y = self.forecasts[i][col], mode = "lines", name = col, 
+                    fig.add_trace(go.Scatter(x = sliced_fc["ds"], y = sliced_fc[col], mode = "lines", name = col, 
                                              line = dict(color = self.color_mapping[number])))
             
             for col in self.forecasts[i].columns:
                 #Lows will go to corresponding his
                 if "lo" in col:
                     number = col[-2:]
-                    fig.add_trace(go.Scatter(x = self.forecasts[i].index, y = self.forecasts[i][col], mode = "lines", name = col, 
+                    fig.add_trace(go.Scatter(x = sliced_fc["ds"], y = sliced_fc[col], mode = "lines", name = col, 
                                              fill = "tonexty", fillcolor = self.color_mapping[number], line = dict(color = self.color_mapping[number])))
             
             for col in self.forecasts[i].columns:
                 #Median gets plotted last
                 if "median" in col:
-                    fig.add_trace(go.Scatter(x = self.forecasts[i].index, y = self.forecasts[i][col], mode = "lines", name = col, 
+                    fig.add_trace(go.Scatter(x = sliced_fc["ds"], y = sliced_fc[col], mode = "lines", name = col, 
                                              line = dict(color = self.color_mapping["median"])))
             
             #Case for if confidence interval not present
             for col in self.forecasts[i].columns:
                 if col == "AutoLSTM":
-                    fig.add_trace(go.Scatter(x = self.forecasts[i].index, y = self.forecasts[i]["AutoLSTM"], mode = "lines", name = "AutoLSTM"))
+                    fig.add_trace(go.Scatter(x = sliced_fc["ds"], y =sliced_fc["AutoLSTM"], mode = "lines", name = "AutoLSTM"))
             
             
-            fig.update_layout(title = f"Fixed Parameter LSTM Predictions, {self.dates[i]}", xaxis_title = "Date", yaxis_title = "Count", hovermode = "x")
+            fig.update_layout(title = f"Fixed Parameter LSTM Predictions, {unique_id, self.dates[i]}", xaxis_title = "Date", yaxis_title = "Count", hovermode = "x")
             fig.show()
             
-    def calculate_metrics(self):
-        for i in range(len(self.forecasts)):
-            mae = mean_absolute_error(self.overall_df[self.overall_df_value_col].loc[self.forecasts[i].index], self.forecasts[i].iloc[:, 0])
-            mse = mean_squared_error(self.overall_df[self.overall_df_value_col].loc[self.forecasts[i].index], self.forecasts[i].iloc[:, 0])
-            mape = mean_absolute_percentage_error(self.overall_df[self.overall_df_value_col].loc[self.forecasts[i].index], self.forecasts[i].iloc[:, 0])
-            nmse = mse/np.var(self.overall_df[self.overall_df_value_col].loc[self.forecasts[i].index])
-            
-            self.maes.append(mae)
-            self.mses.append(mse)
-            self.mapes.append(mape)
-            self.nmses.append(nmse)
-    
-    def display_maes(self):
-        for i in range(len(self.maes)):
-            date_obj = datetime.strptime(self.dates[i], "%Y-%m-%d")
-            english_date = date_obj.strftime("%B %d, %Y")
-            print(f"Mean Absolute Error for {english_date} model: {self.maes[i]}")
+    def calculate_metrics(self, unique_id):
         
-    def display_mses(self):
-        for i in range(len(self.mses)):
-            date_obj = datetime.strptime(self.dates[i], "%Y-%m-%d")
-            english_date = date_obj.strftime("%B %d, %Y")
-            print(f"Mean Squared Error for {english_date} model: {self.mses[i]}")
+        col_string = "AutoLSTM"
+        
+        if "AutoLSTM-median" in self.forecasts[0].columns:
+            col_string = "AutoLSTM-median"
+        
+        sliced_df = self.overall_df[self.overall_df["unique_id"] == unique_id]
+      
+        maes = []
+        mses = []
+        mapes = []
+        nmses = []
+        
+        for i in range(len(self.forecasts)):
+            
+            first_forecast_date = self.forecasts[i].iloc[0]["ds"]
+            final_forecast_date = self.forecasts[i].iloc[-1]["ds"]
+            
+            sliced_fc = self.forecasts[i][self.forecasts[i]["unique_id"] == unique_id]
+            
+            mae = mean_absolute_error(sliced_df[(sliced_df["ds"] >= first_forecast_date) & (sliced_df["ds"] <= final_forecast_date)]["y"], sliced_fc[col_string])
+            mape = mean_absolute_percentage_error(sliced_df[(sliced_df["ds"] >= first_forecast_date) & (sliced_df["ds"] <= final_forecast_date)]["y"], sliced_fc[col_string])
+            mse = mean_squared_error(sliced_df[(sliced_df["ds"] >= first_forecast_date) & (sliced_df["ds"] <= final_forecast_date)]["y"], sliced_fc[col_string])
+            nmse = mse/np.var(sliced_df[(sliced_df["ds"] >= first_forecast_date) & (sliced_df["ds"] <= final_forecast_date)]["y"])
+            
+            maes.append(mae)
+            mses.append(mse)
+            mapes.append(mape)
+            nmses.append(nmse)
+        
+        return (maes, mses, mapes, nmses)
     
-    def display_mapes(self):
-        for i in range(len(self.mapes)):
-            date_obj = datetime.strptime(self.dates[i], "%Y-%m-%d")
-            english_date = date_obj.strftime("%B %d, %Y")
-            print(f"Mean Absolute Percentage Error for {english_date} model: {self.mapes[i]}")
-    
-    def display_nmses(self):
-        for i in range(len(self.nmses)):
-            date_obj = datetime.strptime(self.dates[i], "%Y-%m-%d")
-            english_date = date_obj.strftime("%B %d, %Y")
-            print(f"Normalized Mean Square Error for {english_date} model: {self.nmses[i]}")
     
     def create_metrics_df(self):
-        for i in range(len(self.dates)):
-            self.metrics_df.loc[len(self.metrics_df)] = [self.dates[i], self.maes[i], self.mses[i], self.mapes[i], self.nmses[i]]
+        for unique_id in self.overall_df["unique_id"].unique():
+            maes, mses, mapes, nmses = self.calculate_metrics(unique_id)
+            for i in range(len(self.dates)):
+                self.metrics_df.loc[len(self.metrics_df)] = [self.dates[i], unique_id, maes[i], mses[i], mapes[i], nmses[i]]
         
             
     def create_display_df(self):
         for i in range(len(self.forecasts)):
             for index, row in self.forecasts[i].iterrows():
                 reference_date = self.dates[i]
-                target_end_date = index
+                target_end_date = row[1]
+                unique_id = row[0]
                 
                 for col in self.forecasts[i].columns:
-                    value = self.forecasts[i].loc[target_end_date, col]
+                    value = self.forecasts[i].loc[index, col]
                     if "lo" in col:
                         number = int (col[-2:])
                         alpha = 1 - (number / 100)
                         quantile = alpha / 2
-                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, quantile, value]
+                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, unique_id, quantile, value]
 
                     if col == "AutoLSTM" or "median" in col:
                         quantile = 0.5
-                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, quantile, value]
+                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, unique_id, quantile, value]
 
                     elif "hi" in col:
                         number = int (col[-2:])
                         alpha = 1 - (number / 100)
                         quantile = 1 - (alpha / 2)
-                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, quantile, value]
+                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, unique_id, quantile, value]
                 
-        self.display_df.sort_values(by = ["Reference Date", "Target End Date", "Quantile"], inplace = True)
+        self.display_df.sort_values(by = ["Reference Date", "Target End Date", "unique_id", "Quantile"], inplace = True)
         
         
 
@@ -256,16 +265,15 @@ class UpdatingModelLSTMProcessor:
         self.mapes = []
         self.nmses = []
         
-        self.metrics_df = pd.DataFrame(columns = ["Reference Date", "MAE", "MSE", "MAPE", "NMSE"])
-        self.display_df = pd.DataFrame(columns = ["Reference Date", "Target End Date", "Quantile", "Prediction"])
+        self.metrics_df = pd.DataFrame(columns = ["Reference Date", "unique_id", "MAE", "MSE", "MAPE", "NMSE"])
+        self.display_df = pd.DataFrame(columns = ["Reference Date", "Target End Date", "unique_id", "Quantile", "Prediction"])
     
     def create_training_dfs(self, value_col):
         self.overall_df_value_col = value_col
+        self.overall_df['y'] = self.overall_df.groupby('unique_id', group_keys = False)['y'] \
+            .apply(lambda col: col.interpolate(limit_direction='both'))
         for date in self.dates:
-            df = self.overall_df.loc[:date].copy()
-            df['ds'] = df.index
-            df["unique_id"] = "series_1"
-            df = df.rename(columns = {value_col: "y"})
+            df = self.overall_df[self.overall_df["ds"] <= pd.Timestamp(date)]
             self.dfs.append(df)
     
     def create_models(self, h, freq, model_names, level = [], config = None, save = False):
@@ -275,7 +283,7 @@ class UpdatingModelLSTMProcessor:
                 if config == None:
                     config = self.config_wrapper(index = i, h = h)
                 if not level:   
-                    nf = NeuralForecast(models = [AutoLSTM(h = h, backend = "optuna", config = config, search_alg = optuna.samplers.TPESample())], freq = freq)
+                    nf = NeuralForecast(models = [AutoLSTM(h = h, backend = "optuna", config = config, search_alg = optuna.samplers.TPESampler())], freq = freq)
                     nf.fit(df = self.dfs[i])
                 else:
                     nf = NeuralForecast(models = [AutoLSTM(h = h, backend = "optuna", loss = MQLoss(level = level), config = config, search_alg = optuna.samplers.TPESampler())], 
@@ -291,8 +299,7 @@ class UpdatingModelLSTMProcessor:
         
         for i in range(len(self.dfs)):
             y_hat = self.nfs[i].predict(df = self.dfs[i])
-            y_hat.set_index("ds", inplace = True)
-            y_hat.drop(columns = "unique_id", inplace = True)
+            y_hat.sort_values(by = ["ds", "unique_id"], inplace = True)
             self.forecasts.append(y_hat)
             
     def config_wrapper(self, index, h):
@@ -324,6 +331,8 @@ class UpdatingModelLSTMProcessor:
         for col in columns:
             if 'median' in col:
                 continue
+            if col in ("unique_id", "ds"):
+                continue
             parts = col.split('-')
             number = parts[-1]
             intervals.add(number)
@@ -348,112 +357,120 @@ class UpdatingModelLSTMProcessor:
     
         return color_mapping
     
-    def create_graph(self):
+    def create_graph(self, unique_id):
+        
+        sliced_df = self.overall_df[self.overall_df["unique_id"] == unique_id]
         
         #Create color map for various confidence bands, only if levels are present
-        if len(self.forecasts[0].columns) != 1:
+        if len(self.forecasts[0].columns) > 3:
             self.color_mapping = self.generate_color_map(columns = self.forecasts[0].columns)
                 
         
         for i in range(len(self.forecasts)):
             #Plot the overall Real Data
+            first_forecast_date = self.forecasts[i].iloc[0]["ds"]
+            final_forecast_date = self.forecasts[i].iloc[-1]["ds"]
+            
+            sliced_fc = self.forecasts[i][self.forecasts[i]["unique_id"] == unique_id]
+            
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x = self.overall_df.index, y = self.overall_df[self.overall_df_value_col], mode = "lines", name = "Real Data"))
+            fig.add_trace(go.Scatter(x = sliced_df["ds"], y = sliced_df["y"], mode = "lines", name = "Real Data"))
 
             
             for col in self.forecasts[i].columns:
                 #Plot his first
                 if "hi" in col:
                     number = col[-2:]
-                    fig.add_trace(go.Scatter(x = self.forecasts[i].index, y = self.forecasts[i][col], mode = "lines", name = col, 
+                    fig.add_trace(go.Scatter(x = sliced_fc["ds"], y = sliced_fc[col], mode = "lines", name = col, 
                                              line = dict(color = self.color_mapping[number])))
             
             for col in self.forecasts[i].columns:
                 #Lows will go to corresponding his
                 if "lo" in col:
                     number = col[-2:]
-                    fig.add_trace(go.Scatter(x = self.forecasts[i].index, y = self.forecasts[i][col], mode = "lines", name = col, 
+                    fig.add_trace(go.Scatter(x = sliced_fc["ds"], y = sliced_fc[col], mode = "lines", name = col, 
                                              fill = "tonexty", fillcolor = self.color_mapping[number], line = dict(color = self.color_mapping[number])))
             
             for col in self.forecasts[i].columns:
                 #Median gets plotted last
                 if "median" in col:
-                    fig.add_trace(go.Scatter(x = self.forecasts[i].index, y = self.forecasts[i][col], mode = "lines", name = col, 
+                    fig.add_trace(go.Scatter(x = sliced_fc["ds"], y = sliced_fc[col], mode = "lines", name = col, 
                                              line = dict(color = self.color_mapping["median"])))
             
             #Case for if confidence interval not present
             for col in self.forecasts[i].columns:
                 if col == "AutoLSTM":
-                    fig.add_trace(go.Scatter(x = self.forecasts[i].index, y = self.forecasts[i]["AutoLSTM"], mode = "lines", name = "AutoLSTM"))
+                    fig.add_trace(go.Scatter(x = sliced_fc["ds"], y = sliced_fc["AutoLSTM"], mode = "lines", name = "AutoLSTM"))
             
             
-            fig.update_layout(title = f"Updating Parameter LSTM Predictions, {self.dates[i]}", xaxis_title = "Date", yaxis_title = "Count", hovermode = "x")
+            fig.update_layout(title = f"Updating Parameter LSTM Predictions, {unique_id, self.dates[i]}", xaxis_title = "Date", yaxis_title = "Count", hovermode = "x")
             fig.show()
         
+    def calculate_metrics(self, unique_id):
         
-    def calculate_metrics(self):
+        col_string = "AutoLSTM"
+        
+        if "AutoLSTM-median" in self.forecasts[0].columns:
+            col_string = "AutoLSTM-median"
+        
+        sliced_df = self.overall_df[self.overall_df["unique_id"] == unique_id]
+      
+        maes = []
+        mses = []
+        mapes = []
+        nmses = []
+        
         for i in range(len(self.forecasts)):
-            mae = mean_absolute_error(self.overall_df[self.overall_df_value_col].loc[self.forecasts[i].index], self.forecasts[i].iloc[:, 0])
-            mse = mean_squared_error(self.overall_df[self.overall_df_value_col].loc[self.forecasts[i].index], self.forecasts[i].iloc[:, 0])
-            mape = mean_absolute_percentage_error(self.overall_df[self.overall_df_value_col].loc[self.forecasts[i].index], self.forecasts[i].iloc[:, 0])
-            nmse = mse/np.var(self.overall_df[self.overall_df_value_col].loc[self.forecasts[i].index])
             
-            self.maes.append(mae)
-            self.mses.append(mse)
-            self.mapes.append(mape)
-            self.nmses.append(nmse)
-    
-    def display_maes(self):
-        for i in range(len(self.maes)):
-            date_obj = datetime.strptime(self.dates[i], "%Y-%m-%d")
-            english_date = date_obj.strftime("%B %d, %Y")
-            print(f"Mean Absolute Error for {english_date} model: {self.maes[i]}")
+            first_forecast_date = self.forecasts[i].iloc[0]["ds"]
+            final_forecast_date = self.forecasts[i].iloc[-1]["ds"]
+            
+            sliced_fc = self.forecasts[i][self.forecasts[i]["unique_id"] == unique_id]
+            
+            mae = mean_absolute_error(sliced_df[(sliced_df["ds"] >= first_forecast_date) & (sliced_df["ds"] <= final_forecast_date)]["y"], sliced_fc[col_string])
+            mape = mean_absolute_percentage_error(sliced_df[(sliced_df["ds"] >= first_forecast_date) & (sliced_df["ds"] <= final_forecast_date)]["y"], sliced_fc[col_string])
+            mse = mean_squared_error(sliced_df[(sliced_df["ds"] >= first_forecast_date) & (sliced_df["ds"] <= final_forecast_date)]["y"], sliced_fc[col_string])
+            nmse = mse/np.var(sliced_df[(sliced_df["ds"] >= first_forecast_date) & (sliced_df["ds"] <= final_forecast_date)]["y"])
+            
+            maes.append(mae)
+            mses.append(mse)
+            mapes.append(mape)
+            nmses.append(nmse)
         
-    def display_mses(self):
-        for i in range(len(self.mses)):
-            date_obj = datetime.strptime(self.dates[i], "%Y-%m-%d")
-            english_date = date_obj.strftime("%B %d, %Y")
-            print(f"Mean Squared Error for {english_date} model: {self.mses[i]}")
+        return (maes, mses, mapes, nmses)
     
-    def display_mapes(self):
-        for i in range(len(self.mapes)):
-            date_obj = datetime.strptime(self.dates[i], "%Y-%m-%d")
-            english_date = date_obj.strftime("%B %d, %Y")
-            print(f"Mean Absolute Percentage Error for {english_date} model: {self.mapes[i]}")
     
-    def display_nmses(self):
-        for i in range(len(self.nmses)):
-            date_obj = datetime.strptime(self.dates[i], "%Y-%m-%d")
-            english_date = date_obj.strftime("%B %d, %Y")
-            print(f"Normalized Mean Square Error for {english_date} model: {self.nmses[i]}")
-        
     def create_metrics_df(self):
-        for i in range(len(self.dates)):
-            self.metrics_df.loc[len(self.metrics_df)] = [self.dates[i], self.maes[i], self.mses[i], self.mapes[i], self.nmses[i]]
-    
+        for unique_id in self.overall_df["unique_id"].unique():
+            maes, mses, mapes, nmses = self.calculate_metrics(unique_id)
+            for i in range(len(self.dates)):
+                self.metrics_df.loc[len(self.metrics_df)] = [self.dates[i], unique_id, maes[i], mses[i], mapes[i], nmses[i]]
+        
+            
     def create_display_df(self):
         for i in range(len(self.forecasts)):
             for index, row in self.forecasts[i].iterrows():
                 reference_date = self.dates[i]
-                target_end_date = index
+                target_end_date = row[1]
+                unique_id = row[0]
                 
                 for col in self.forecasts[i].columns:
-                    value = self.forecasts[i].loc[target_end_date, col]
+                    value = self.forecasts[i].loc[index, col]
                     if "lo" in col:
                         number = int (col[-2:])
                         alpha = 1 - (number / 100)
                         quantile = alpha / 2
-                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, quantile, value]
+                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, unique_id, quantile, value]
 
                     if col == "AutoLSTM" or "median" in col:
                         quantile = 0.5
-                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, quantile, value]
+                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, unique_id, quantile, value]
 
                     elif "hi" in col:
                         number = int (col[-2:])
                         alpha = 1 - (number / 100)
                         quantile = 1 - (alpha / 2)
-                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, quantile, value]
+                        self.display_df.loc[len(self.display_df)] = [reference_date, target_end_date, unique_id, quantile, value]
                 
-        self.display_df.sort_values(by = ["Reference Date", "Target End Date", "Quantile"], inplace = True)
+        self.display_df.sort_values(by = ["Reference Date", "Target End Date", "unique_id", "Quantile"], inplace = True)
             
