@@ -13,6 +13,8 @@ import matplotlib.colors as mcolors
 from neuralforecast.losses.pytorch import MQLoss
 import optuna
 
+from pathlib import Path
+
 
 
 class FixedModelPatchTSTProcessor:
@@ -61,9 +63,11 @@ class FixedModelPatchTSTProcessor:
                 self.nf.fit(df = self.dfs[0])
             if save:
                 here = Path(__file__).resolve().parent
-                models_dir = here.parent / "AutoPatchTST Models" / "fixed_models"
-                models_dir.mkdir(parents=True, exist_ok=True)
-                self.nf.save(path=models_dir / f"{model_name}/", overwrite=True)
+                base_dir = here.parent / "AutoPatchTST Models" / "fixed_models"
+                model_path = base_dir / model_name
+
+                model_path.mkdir(parents=True, exist_ok=True)
+                self.nf.save(path=str(model_path), overwrite=True)
 
         for i in range(len(self.dfs)):
             df = self.dfs[i]
@@ -84,7 +88,9 @@ class FixedModelPatchTSTProcessor:
             "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
             "random_seed": trial.suggest_int("random_seed", 1, 99999),
             "n_heads": trial.suggest_categorical("n_heads", [8, 16, 32]),
-            "max_steps": 1000
+            "patch_len": trial.suggest_categorical("patch_len", [16, 32, 64]),
+            "stride": trial.suggest_categorical("stride", [4, 8, 16, 32]),
+            "max_steps": 5000
             }
     
         return config_PatchTST
@@ -286,9 +292,11 @@ class UpdatingModelPatchTSTProcessor:
                 self.nfs.append(nf)
                 if save:
                     here = Path(__file__).resolve().parent
-                    models_dir = here.parent / "AutoPatchTST Models" / "updating_models"
-                    models_dir.mkdir(parents=True, exist_ok=True)
-                    nf.save(path=models_dir / f"{model_names[i]}/", overwrite = True)
+                    base_dir = here.parent / "AutoPatchTST Models" / "updating_models"
+                    model_path = base_dir / model_names[i]
+
+                    model_path.mkdir(parents=True, exist_ok=True)
+                    self.nfs[i].save(path=str(model_path), overwrite=True)
                     
         for i in range(len(self.dfs)):
             y_hat = self.nfs[i].predict(df = self.dfs[i])
@@ -307,7 +315,9 @@ class UpdatingModelPatchTSTProcessor:
             "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
             "random_seed": trial.suggest_int("random_seed", 1, 99999),
             "n_heads": trial.suggest_categorical("n_heads", [8, 16, 32]),
-            "max_steps": 1000
+            "patch_len": trial.suggest_categorical("patch_len", [16, 32, 64]),
+            "stride": trial.suggest_categorical("stride", [4, 8, 16, 32]),
+            "max_steps": 5000
             }
     
         return config_PatchTST
@@ -365,7 +375,7 @@ class UpdatingModelPatchTSTProcessor:
             sliced_fc = self.forecasts[i][self.forecasts[i]["unique_id"] == unique_id]
             
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x = sliced_df["ds"], y = sliced_df[col], mode = "lines", name = "Real Data"))
+            fig.add_trace(go.Scatter(x = sliced_df["ds"], y = sliced_df["y"], mode = "lines", name = "Real Data"))
 
             
             for col in self.forecasts[i].columns:

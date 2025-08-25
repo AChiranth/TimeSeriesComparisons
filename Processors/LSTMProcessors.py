@@ -14,6 +14,8 @@ import matplotlib.colors as mcolors
 from neuralforecast.losses.pytorch import MQLoss
 import optuna
 
+from pathlib import Path
+
 
 
 class FixedModelLSTMProcessor:
@@ -65,9 +67,12 @@ class FixedModelLSTMProcessor:
                 self.nf.fit(df = self.dfs[0])
             if save:
                 here = Path(__file__).resolve().parent
-                models_dir = here.parent / "AutoLSTM Models" / "fixed_models"
-                models_dir.mkdir(parents=True, exist_ok=True)
-                self.nf.save(path=models_dir / f"{model_name}/", overwrite=True)
+                base_dir = here.parent / "AutoLSTM Models" / "fixed_models"
+                model_path = base_dir / model_name
+
+                model_path.mkdir(parents=True, exist_ok=True)
+                self.nf.save(path=str(model_path), overwrite=True)
+                
 
         for i in range(len(self.dfs)):
             df = self.dfs[i]
@@ -292,10 +297,14 @@ class UpdatingModelLSTMProcessor:
                 
                 self.nfs.append(nf)
                 if save:
+                    
                     here = Path(__file__).resolve().parent
-                    models_dir = here.parent / "AutoLSTM Models" / "updating_models"
-                    models_dir.mkdir(parents=True, exist_ok=True)
-                    nf.save(path=models_dir / f"{model_names[i]}/", overwrite = True)
+                    base_dir = here.parent / "AutoLSTM Models" / "updating_models"
+                    model_path = base_dir / model_names[i]
+
+                    model_path.mkdir(parents=True, exist_ok=True)
+                    self.nfs[i].save(path=str(model_path), overwrite=True)
+
         
         for i in range(len(self.dfs)):
             y_hat = self.nfs[i].predict(df = self.dfs[i])
